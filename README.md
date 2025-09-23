@@ -1,3 +1,3 @@
 ## Demo
 
-[![Watch the demo](docs/demo-thumb.png)](docs/demo.mp4)
+![Sudoku Solver Demo](docs/demo.gif)
