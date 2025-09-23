@@ -1,37 +1,74 @@
-use std::{array, collections::HashSet, io::empty, time::Duration};
+use std::time::Duration;
 use colored::*;
-use rand::{seq::SliceRandom, Rng};
 use std::thread::sleep;
 use std::time::Instant;
 
+
+#[derive(Clone, Copy)]
+struct DebugMode {
+    enabled: bool,
+    show_try: bool,
+    show_accept: bool,
+    show_reject: bool,
+    show_backtrack: bool,
+
+    try_ms: u64,
+    accept_ms: u64,
+    reject_ms: u64,
+    backtrack_ms: u64,
+}
+
+impl Default for DebugMode {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            show_try: false,
+            show_accept: false,
+            show_reject: false,
+            show_backtrack: false,
+
+            try_ms: 0,
+            accept_ms: 0,
+            reject_ms: 0,
+            backtrack_ms: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DebugKind {
+    Try,
+    Accept,
+    Reject,
+    Backtrack,
+}
+
 struct Sudoku {
     grid: [[char; 9]; 9],
-    steps: Vec<Step>,
+    debug: DebugMode,
 }
 
 struct Step {
     x: usize,
     y: usize,
     char: char,
-    original: bool,
 }
 
 impl Step {
-    fn new(x: usize, y: usize, char: char, original: bool) -> Self {
+    fn new(x: usize, y: usize, char: char) -> Self {
         Self {
             x,
             y,
             char,
-            original,
         }
     }
 }
 
 impl Sudoku {
-    fn new() -> Self {
+    fn new(debug: DebugMode) -> Self {
         Self {
-            grid: [['.'; 9];9],
-            steps: Vec::new(),
+            grid: [['.'; 9]; 9],
+            debug: debug,
         }
     }
 
@@ -90,6 +127,58 @@ impl Sudoku {
         }
     }
 
+    fn print_marked(&self, mark: Option<(usize, usize)>, label: &str) {
+        clear_screen();
+        if let Some((mx, my)) = mark {
+            println!("{} at ({}, {})", label, mx, my);
+        } else {
+            println!("{}", label);
+        }
+
+        let mut invalid_characters = Vec::new();
+        for x in 0..9 {
+            for y in 0..9 {
+                if !self.check_pos_for_valid(x, y) {
+                    invalid_characters.push((x, y));
+                }
+            }
+        }
+
+        for x in 0..9 {
+            for y in 0..9 {
+                let s = self.grid[x][y].to_string();
+
+                // vertical box lines
+                if y == 3 || y == 6 { print!("|"); }
+
+                // choose color/marking
+                let colored = if Some((x,y)) == mark {
+                    s.bold().yellow().to_string()
+                } else if invalid_characters.contains(&(x,y)) {
+                    s.red().to_string()
+                } else {
+                    s.white().to_string()
+                };
+                print!("{}", colored);
+            }
+            println!();
+            if x == 2 || x == 5 { println!("-----------"); }
+        }
+    }
+
+    fn debug_pause(&self, kind: DebugKind) {
+        if !self.debug.enabled { return; }
+        let ms = match kind {
+            DebugKind::Try => self.debug.try_ms,
+            DebugKind::Accept => self.debug.accept_ms,
+            DebugKind::Reject => self.debug.reject_ms,
+            DebugKind::Backtrack => self.debug.backtrack_ms,
+        };
+        if ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+    }
+
     fn check_sudoku_valid(&self) -> bool{
         for x in 0..9 {
             for y in 0..9  {
@@ -130,16 +219,31 @@ impl Sudoku {
             empty_locations[current_index].0,
             empty_locations[current_index].1,
             '1',
-            false,
         );
 
         for i in 0..cycles {
             let (pos_x, pos_y, pos_char) = (current_step.x, current_step.y, current_step.char);
 
+            // --- TRY ---
+            if self.debug.enabled && self.debug.show_try {
+                self.populate(pos_x, pos_y, pos_char);
+                self.print_marked(Some((pos_x, pos_y)),
+                                  &format!("TRY '{}' (cycle {i})", pos_char));
+                self.remove_entry(pos_x, pos_y);
+                self.debug_pause(DebugKind::Try);
+            }
+
             // Try to place the current character
             self.populate(pos_x, pos_y, pos_char);
 
             if !self.check_pos_for_valid(pos_x, pos_y) {
+                // --- REJECT ---
+                if self.debug.enabled && self.debug.show_reject {
+                    self.print_marked(Some((pos_x, pos_y)),
+                                      &format!("REJECT '{}' (conflict)", pos_char));
+                    self.debug_pause(DebugKind::Reject);
+                }
+
                 // Invalid placement, remove and try next number
                 self.remove_entry(pos_x, pos_y);
                 let new_value = pos_char.to_digit(10).unwrap() + 1;
@@ -161,6 +265,14 @@ impl Sudoku {
                         // Backtrack to the previous cell
                         current_step = steps.pop().unwrap();
                         current_index -= 1;
+
+                        // --- BACKTRACK ---
+                        if self.debug.enabled && self.debug.show_backtrack {
+                            // highlight the cell we're returning to
+                            self.print_marked(Some((current_step.x, current_step.y)), "BACKTRACK");
+                            self.debug_pause(DebugKind::Backtrack);
+                        }
+
                         let new_value = current_step.char.to_digit(10).unwrap() + 1;
 
                         if new_value <= 9 {
@@ -175,6 +287,13 @@ impl Sudoku {
                     }
                 }
             } else {
+                // --- ACCEPT ---
+                if self.debug.enabled && self.debug.show_accept {
+                    self.print_marked(Some((pos_x, pos_y)),
+                                      &format!("ACCEPT '{}' (advance)", pos_char));
+                    self.debug_pause(DebugKind::Accept);
+                }
+
                 // Valid placement, move to the next cell
                 steps.push(current_step);
                 current_index += 1;
@@ -189,7 +308,7 @@ impl Sudoku {
 
                 // Prepare the next step
                 let (next_x, next_y) = empty_locations[current_index];
-                current_step = Step::new(next_x, next_y, '1', false);
+                current_step = Step::new(next_x, next_y, '1');
             }
         }
 
@@ -238,8 +357,29 @@ impl Sudoku {
     }
 }
 
+fn clear_screen() {
+    // ANSI escape code to clear terminal and move cursor to top-left
+    print!("\n\n\n");
+}
+
 fn main() {
-    let mut sudoku = Sudoku::new();
+    let sudoku_preview_time = 0;
+    let time_between_sudokus = 0;
+
+    let debug = DebugMode {
+        enabled: true,
+        show_try: false,
+        show_accept: true,
+        show_reject: true,
+        show_backtrack: true,
+
+        try_ms: 100,
+        accept_ms: 50,
+        reject_ms: 400,
+        backtrack_ms: 50,
+    };
+
+    let mut sudoku = Sudoku::new(debug);
 
     let sudoku_grid_easy = [
         ['5', '3', '.', '.', '7', '.', '.', '.', '.'],
@@ -286,10 +426,11 @@ fn main() {
         ['.', '6', '.', '.', '.', '.', '.', '9', '.'],
     ];
 
+
     println!("Easy sudoku!");
     sudoku.fill(sudoku_grid_easy);
     sudoku.print();
-    sleep(Duration::from_secs(5));
+    sleep(Duration::from_secs(sudoku_preview_time));
     println!("");
     println!("Start!");
     let start_time = Instant::now();
@@ -297,11 +438,12 @@ fn main() {
     let end_time = Instant::now();
     println!("Done! Took {:?}", end_time.duration_since(start_time));
     println!("");
+    sleep(Duration::from_secs(time_between_sudokus));
 
     println!("Medium sudoku!");
     sudoku.fill(sudoku_grid_medium);
     sudoku.print();
-    sleep(Duration::from_secs(5));
+    sleep(Duration::from_secs(sudoku_preview_time));
     println!("");
     println!("Start!");
     let start_time = Instant::now();
@@ -309,11 +451,12 @@ fn main() {
     let end_time = Instant::now();
     println!("Done! Took {:?}", end_time.duration_since(start_time));
     println!("");
+    sleep(Duration::from_secs(time_between_sudokus));
 
     println!("Hard sudoku!");
     sudoku.fill(sudoku_grid_hard);
     sudoku.print();
-    sleep(Duration::from_secs(5));
+    sleep(Duration::from_secs(sudoku_preview_time));
     println!("");
     println!("Start!");
     let start_time = Instant::now();
@@ -321,11 +464,12 @@ fn main() {
     let end_time = Instant::now();
     println!("Done! Took {:?}", end_time.duration_since(start_time));
     println!("");
+    sleep(Duration::from_secs(time_between_sudokus));
 
     println!("Very hard sudoku!");
     sudoku.fill(sudoku_grid_very_hard);
     sudoku.print();
-    sleep(Duration::from_secs(5));
+    sleep(Duration::from_secs(sudoku_preview_time));
     println!("");
     println!("Start!");
     let start_time = Instant::now();
@@ -333,4 +477,5 @@ fn main() {
     let end_time = Instant::now();
     println!("Done! Took {:?}", end_time.duration_since(start_time));
     println!("");
+    sleep(Duration::from_secs(time_between_sudokus));
 }
