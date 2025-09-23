@@ -1,3 +1,3 @@
 ## Demo
 
-<video src="docs/demo.mp4" controls autoplay loop muted width="600"></video>
+[![Watch the demo](docs/demo-thumb.png)](docs/demo.mp4)
