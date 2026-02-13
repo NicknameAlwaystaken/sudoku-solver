@@ -2,7 +2,17 @@ use std::time::Duration;
 use colored::*;
 use std::thread::sleep;
 use std::time::Instant;
+use clap::Parser;
 
+#[derive(Debug, Parser)]
+#[command(version, about)]
+struct Args {
+    #[arg(short, long)]
+    debug: bool,
+
+    #[arg(short, long)]
+    verbose: bool,
+}
 
 #[derive(Clone, Copy)]
 struct DebugMode {
@@ -363,20 +373,22 @@ fn clear_screen() {
 }
 
 fn main() {
+    let args: Args = Args::parse();
+
     let sudoku_preview_time = 0;
     let time_between_sudokus = 0;
 
     let debug = DebugMode {
-        enabled: true,
-        show_try: false,
-        show_accept: true,
-        show_reject: true,
-        show_backtrack: true,
+        enabled: args.debug,
+        show_try: args.verbose,
+        show_accept: args.debug,
+        show_reject: args.debug,
+        show_backtrack: args.verbose,
 
         try_ms: 100,
         accept_ms: 50,
         reject_ms: 400,
-        backtrack_ms: 50,
+        backtrack_ms: 500,
     };
 
     let mut sudoku = Sudoku::new(debug);
