@@ -1,8 +1,226 @@
-use std::time::Duration;
-use colored::*;
-use std::thread::sleep;
-use std::time::Instant;
 use clap::Parser;
+use eframe::egui;
+
+
+struct Solver {
+    cycles_done: usize,
+}
+
+impl Solver {
+    fn new() -> Self {
+        Self { cycles_done: 0 }
+    }
+
+    fn solve(&mut self, grid: &mut [u8; 81], cycle_limit: usize) -> bool {
+        self.cycles_done = 0;
+
+        let mut empty_locations: Vec<usize> = Vec::new();
+
+        for idx in 0..81 {
+            if grid[idx] == 0 {
+                empty_locations.push(idx);
+            }
+        }
+
+        if empty_locations.is_empty() {
+            println!("Puzzle is already solved!");
+            return true;
+        }
+
+        let mut steps: Vec<Step> = Vec::new();
+
+        let mut empty_i: usize = 0;
+        let mut next_try: u8 = 1;
+
+        while self.cycles_done < cycle_limit {
+            self.cycles_done += 1;
+
+            let cell_idx = empty_locations[empty_i];
+            grid[cell_idx] = 0;
+
+            let mut placed = false;
+
+            while next_try <= 9 {
+                if check_pos_for_valid(grid, cell_idx, next_try) {
+                    grid[cell_idx] = next_try;
+
+                    steps.push(Step { empty_i, next: next_try + 1 });
+                    empty_i += 1;
+                    next_try = 1;
+                    placed = true;
+                    break;
+                }
+                next_try += 1;
+            }
+
+            if placed {
+                if empty_i == empty_locations.len() {
+                    return true;
+                }
+                continue;
+            }
+
+            let Some(prev) = steps.pop() else {
+                return false;
+            };
+
+            empty_i = prev.empty_i;
+            next_try = prev.next;
+        }
+
+        false
+    }
+
+    fn check_sudoku_valid(grid: &[u8; 81]) -> bool {
+        for idx in 0..81 {
+            let val = grid[idx];
+            if val == 0 { continue; }
+            if !check_pos_for_valid(grid, idx, val) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+fn check_pos_for_valid(grid: &[u8; 81], idx: usize, val: u8) -> bool {
+    debug_assert!(val >= 1 && val <= 9);
+
+    let row = idx / 9;
+    let col = idx % 9;
+
+    for c in 0..9 {
+        let i = get_idx(row, c);
+        if i != idx && grid[i] == val {
+            return false;
+        }
+    }
+
+    for r in 0..9 {
+        let i = get_idx(r, col);
+        if i != idx && grid[i] == val {
+            return false;
+        }
+    }
+
+    let box_r = (row / 3) * 3;
+    let box_c = (col / 3) * 3;
+
+    for r in box_r..box_r + 3 {
+        for c in box_c..box_c + 3 {
+            let i = get_idx(r, c);
+            if i != idx && grid[i] == val {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+struct SudokuApp {
+    grid: [u8; 81],
+    selected: Option<usize>,
+
+    solver: Solver,
+    message: String,
+    last_solve_ms: Option<f64>,
+    cycle_limit: usize,
+
+    givens: [bool; 81], // optional: lock original cells
+}
+
+impl SudokuApp {
+    fn new(cc: &eframe::CreationContext<'_>, args: Args) -> Self {
+        cc.egui_ctx.set_pixels_per_point(0.5);
+
+        Self {
+            grid: [0; 81],
+            selected: None,
+            solver: Solver::new(),
+            message: String::new(),
+            last_solve_ms: None,
+            cycle_limit: 1_000_000_000,
+            givens: [false; 81],
+        }
+    }
+
+    fn load_preset(&mut self, p: [u8;81]) {
+        self.grid = p;
+        self.selected = None;
+        self.givens = self.grid.map(|v| v != 0);
+        self.message.clear();
+        self.last_solve_ms = None;
+    }
+}
+
+impl eframe::App for SudokuApp {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        handle_digit_keys(ctx, &mut self.grid, self.selected);
+
+        egui::CentralPanel::default()
+            .show(ctx, |ui| {
+                let available = ui.available_size();
+
+                let margin_x = (available.x * 0.05) as i8;
+                let margin_y = (available.y * 0.05) as i8;
+
+                egui::Frame::none()
+                    .inner_margin(egui::Margin::symmetric(margin_x, margin_y))
+                    .show(ui, |ui| {
+                        let available = ui.available_size();
+                        let board_area = egui::vec2(available.x, available.y * 0.5);
+
+                        ui.allocate_ui_with_layout(
+                            board_area,
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                draw_sudoku_grid(ui, &mut self.grid, &mut self.selected);
+                            },
+                        );
+
+                    });
+
+                ui.horizontal(|ui| {
+                    if ui.button("Easy").clicked() { self.load_preset(preset_easy()); }
+                    if ui.button("Clear").clicked() {
+                        self.grid = [0;81];
+                        self.givens = [false;81];
+                        self.selected = None;
+                    }
+
+                    if ui.button("Solve").clicked() {
+                        if !Solver::check_sudoku_valid(&self.grid) {
+                            self.message = "Invalid puzzle (conflict in givens)".into();
+                        } else {
+                            let start = std::time::Instant::now();
+                            let solved = self.solver.solve(&mut self.grid, self.cycle_limit);
+                            self.last_solve_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+                            self.message = if solved { "Solved.".into() } else { "No solution / limit reached.".into() };
+                        }
+                    }
+                });
+                if let Some(ms) = self.last_solve_ms {
+                    ui.label(format!("Last solve: {:.2} ms", ms));
+                }
+                ui.label(&self.message);
+            });
+    }
+}
+
+fn preset_easy() -> [u8;81] {
+    [
+        5,3,0, 0,7,0, 0,0,0,
+        6,0,0, 1,9,5, 0,0,0,
+        0,9,8, 0,0,0, 0,6,0,
+        8,0,0, 0,6,0, 0,0,3,
+        4,0,0, 8,0,3, 0,0,1,
+        7,0,0, 0,2,0, 0,0,6,
+        0,6,0, 0,0,0, 2,8,0,
+        0,0,0, 4,1,9, 0,0,5,
+        0,0,0, 0,8,0, 0,7,9,
+    ]
+}
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -14,357 +232,133 @@ struct Args {
     verbose: bool,
 }
 
-#[derive(Clone, Copy)]
-struct DebugMode {
-    enabled: bool,
-    show_try: bool,
-    show_accept: bool,
-    show_reject: bool,
-    show_backtrack: bool,
-
-    try_ms: u64,
-    accept_ms: u64,
-    reject_ms: u64,
-    backtrack_ms: u64,
-}
-
-impl Default for DebugMode {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            show_try: false,
-            show_accept: false,
-            show_reject: false,
-            show_backtrack: false,
-
-            try_ms: 0,
-            accept_ms: 0,
-            reject_ms: 0,
-            backtrack_ms: 0,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum DebugKind {
-    Try,
-    Accept,
-    Reject,
-    Backtrack,
-}
-
-struct Sudoku {
-    grid: [[char; 9]; 9],
-    debug: DebugMode,
-}
-
 struct Step {
-    x: usize,
-    y: usize,
-    char: char,
+    empty_i: usize,
+    next: u8,
 }
 
-impl Step {
-    fn new(x: usize, y: usize, char: char) -> Self {
-        Self {
-            x,
-            y,
-            char,
-        }
-    }
+fn draw_sudoku_grid(
+    ui: &mut egui::Ui,
+    grid: &mut [u8; 81],
+    selected: &mut Option<usize>,
+) {
+    let outer_gap = 12.0;
+    let inner_gap = 4.0;
+
+    let available = ui.available_size();
+    let board_size = available.x.min(available.y);
+
+    let total_gap = 6.0 * inner_gap + 2.0 * outer_gap;
+
+    let cell = ((board_size - total_gap) / 9.0).floor().max(10.0);
+    let cell_size = egui::vec2(cell, cell);
+
+    egui::Grid::new("outer_grid")
+        .spacing(egui::vec2(outer_gap, outer_gap)) // spacing between 3x3 boxes
+        .show(ui, |ui| {
+            for box_row in 0..3 {
+                for box_col in 0..3 {
+                    ui.vertical(|ui| {
+                        egui::Grid::new(format!("inner_{}_{}", box_row, box_col))
+                            .spacing(egui::vec2(inner_gap, inner_gap))
+                            .show(ui, |ui| {
+                                for r in 0..3 {
+                                    for c in 0..3 {
+                                        let global_row = box_row * 3 + r;
+                                        let global_col = box_col * 3 + c;
+                                        let idx = global_row * 9 + global_col;
+
+                                        let label = match grid[idx] {
+                                            0 => " ",
+                                            1 => "1",
+                                            2 => "2",
+                                            3 => "3",
+                                            4 => "4",
+                                            5 => "5",
+                                            6 => "6",
+                                            7 => "7",
+                                            8 => "8",
+                                            9 => "9",
+                                            _ => "?",
+                                        };
+
+                                        let is_selected = *selected == Some(idx);
+
+                                        let resp = cell_button(ui, cell_size, &label, is_selected);
+
+                                        if resp.clicked() {
+                                            *selected = Some(idx);
+                                            resp.request_focus();
+                                        }
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                }
+                ui.end_row();
+            }
+        });
 }
 
-impl Sudoku {
-    fn new(debug: DebugMode) -> Self {
-        Self {
-            grid: [['.'; 9]; 9],
-            debug: debug,
-        }
-    }
+fn cell_button(ui: &mut egui::Ui, size: egui::Vec2, label: &str, selected: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
 
-    fn populate(&mut self, x: usize, y: usize, value: char ) {
-        self.grid[x][y] = value;
-    }
+    // Hover/pressed visuals come from the style interaction
+    let interact = ui.style().interact(&resp);
+    let visuals = ui.visuals();
 
-    fn populate_grid(&mut self, x: usize, y: usize, arr: [char; 9] ) {
-        if x <= 2 && y <= 2 {
-            let mut array_index = 0;
-            for new_y in 0..3 {
-                for new_x in 0..3 {
-                    self.grid[y * 3 + new_y][x * 3 + new_x] = arr[array_index];
-                    array_index += 1;
-                }
-            }
-        }
-    }
+    let (fill, stroke) = if selected {
+        (visuals.selection.bg_fill, visuals.selection.stroke)
+    } else {
+        (interact.bg_fill, interact.bg_stroke)
+    };
 
-    fn remove_entry(&mut self, x: usize, y: usize ) {
-        self.grid[x as usize][y as usize] = '.';
-    }
+    ui.painter().rect(
+        rect,
+        2.0,
+        fill,
+        stroke,
+        egui::StrokeKind::Middle,
+    );
 
-    fn print(&self) {
-        let mut invalid_characters = Vec::new();
-        for x in 0..9 {
-            for y in 0..9  {
-                if !Self::check_pos_for_valid(&self, x, y) {
-                    invalid_characters.push((x, y));
-                    println!("Invalid at: {}, {}", x, y)
-                }
-            }
-        }
-        for x in 0..9 {
-            for y in 0..9  {
-                let mut invalid = false;
-                for (invalid_x, invalid_y) in invalid_characters.iter() {
-                    if *invalid_x == x && *invalid_y == y {
-                        invalid = true;
-                        break;
-                    }
-                }
-                let char = self.grid[x][y].to_string();
-                if y == 3 || y == 6 {
-                    print!("|")
-                }
-                print!("{}", if invalid {char.red()} else { char.white() })
-            }
-            if x == 2 || x == 5 {
-                println!("");
-                println!("-----------");
-            }
-            else {
-                println!("");
-            }
-        }
-    }
+    let font_size = (size.y * 0.75).clamp(10.0, 40.0);
+    let font_id = egui::FontId::monospace(font_size);
 
-    fn print_marked(&self, mark: Option<(usize, usize)>, label: &str) {
-        clear_screen();
-        if let Some((mx, my)) = mark {
-            println!("{} at ({}, {})", label, mx, my);
-        } else {
-            println!("{}", label);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        font_id,
+        visuals.text_color(),
+    );
+
+    resp
+}
+
+fn handle_digit_keys(ctx: &egui::Context, grid: &mut [u8; 81], selected: Option<usize>) {
+    let Some(idx) = selected else { return };
+
+    ctx.input(|i| {
+        if i.key_pressed(egui::Key::Backspace) {
+            grid[idx] = 0;
         }
 
-        let mut invalid_characters = Vec::new();
-        for x in 0..9 {
-            for y in 0..9 {
-                if !self.check_pos_for_valid(x, y) {
-                    invalid_characters.push((x, y));
-                }
-            }
+        let d = if i.key_pressed(egui::Key::Num1) { Some(1) }
+        else if i.key_pressed(egui::Key::Num2) { Some(2) }
+        else if i.key_pressed(egui::Key::Num3) { Some(3) }
+        else if i.key_pressed(egui::Key::Num4) { Some(4) }
+        else if i.key_pressed(egui::Key::Num5) { Some(5) }
+        else if i.key_pressed(egui::Key::Num6) { Some(6) }
+        else if i.key_pressed(egui::Key::Num7) { Some(7) }
+        else if i.key_pressed(egui::Key::Num8) { Some(8) }
+        else if i.key_pressed(egui::Key::Num9) { Some(9) }
+        else { None };
+
+        if let Some(d) = d {
+            grid[idx] = d;
         }
-
-        for x in 0..9 {
-            for y in 0..9 {
-                let s = self.grid[x][y].to_string();
-
-                // vertical box lines
-                if y == 3 || y == 6 { print!("|"); }
-
-                // choose color/marking
-                let colored = if Some((x,y)) == mark {
-                    s.bold().yellow().to_string()
-                } else if invalid_characters.contains(&(x,y)) {
-                    s.red().to_string()
-                } else {
-                    s.white().to_string()
-                };
-                print!("{}", colored);
-            }
-            println!();
-            if x == 2 || x == 5 { println!("-----------"); }
-        }
-    }
-
-    fn debug_pause(&self, kind: DebugKind) {
-        if !self.debug.enabled { return; }
-        let ms = match kind {
-            DebugKind::Try => self.debug.try_ms,
-            DebugKind::Accept => self.debug.accept_ms,
-            DebugKind::Reject => self.debug.reject_ms,
-            DebugKind::Backtrack => self.debug.backtrack_ms,
-        };
-        if ms > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-        }
-    }
-
-    fn check_sudoku_valid(&self) -> bool{
-        for x in 0..9 {
-            for y in 0..9  {
-                if !Self::check_pos_for_valid(&self, x, y) {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    fn solve(&mut self, cycles: usize) {
-        let mut empty_locations: Vec<(usize, usize)> = Vec::new();
-        let mut original_cells = [[false; 9]; 9];
-
-        // Collect empty cells and mark original cells
-        for x in 0..9 {
-            for y in 0..9 {
-                if self.grid[x][y] != '.' {
-                    original_cells[x][y] = true;
-                } else {
-                    empty_locations.push((x, y));
-                }
-            }
-        }
-
-        if empty_locations.is_empty() {
-            println!("Puzzle is already solved!");
-            return;
-        }
-
-        // Initialize the steps stack
-        let mut steps: Vec<Step> = Vec::new();
-
-        // Start from the first empty cell
-        let mut current_index = 0;
-        let mut current_step = Step::new(
-            empty_locations[current_index].0,
-            empty_locations[current_index].1,
-            '1',
-        );
-
-        for i in 0..cycles {
-            let (pos_x, pos_y, pos_char) = (current_step.x, current_step.y, current_step.char);
-
-            // --- TRY ---
-            if self.debug.enabled && self.debug.show_try {
-                self.populate(pos_x, pos_y, pos_char);
-                self.print_marked(Some((pos_x, pos_y)),
-                                  &format!("TRY '{}' (cycle {i})", pos_char));
-                self.remove_entry(pos_x, pos_y);
-                self.debug_pause(DebugKind::Try);
-            }
-
-            // Try to place the current character
-            self.populate(pos_x, pos_y, pos_char);
-
-            if !self.check_pos_for_valid(pos_x, pos_y) {
-                // --- REJECT ---
-                if self.debug.enabled && self.debug.show_reject {
-                    self.print_marked(Some((pos_x, pos_y)),
-                                      &format!("REJECT '{}' (conflict)", pos_char));
-                    self.debug_pause(DebugKind::Reject);
-                }
-
-                // Invalid placement, remove and try next number
-                self.remove_entry(pos_x, pos_y);
-                let new_value = pos_char.to_digit(10).unwrap() + 1;
-
-                if new_value <= 9 {
-                    // Try the next number for this cell
-                    current_step.char = char::from_digit(new_value, 10).unwrap();
-                } else {
-                    // Need to backtrack
-                    self.grid[pos_x][pos_y] = '.'; // Reset the cell
-
-                    loop {
-                        if steps.is_empty() {
-                            self.print();
-                            println!("No solution exists!");
-                            return;
-                        }
-
-                        // Backtrack to the previous cell
-                        current_step = steps.pop().unwrap();
-                        current_index -= 1;
-
-                        // --- BACKTRACK ---
-                        if self.debug.enabled && self.debug.show_backtrack {
-                            // highlight the cell we're returning to
-                            self.print_marked(Some((current_step.x, current_step.y)), "BACKTRACK");
-                            self.debug_pause(DebugKind::Backtrack);
-                        }
-
-                        let new_value = current_step.char.to_digit(10).unwrap() + 1;
-
-                        if new_value <= 9 {
-                            // Try the next number for this cell
-                            current_step.char = char::from_digit(new_value, 10).unwrap();
-                            break; // Exit loop to retry with new value
-                        } else {
-                            // Reset and continue backtracking
-                            self.grid[current_step.x][current_step.y] = '.';
-                            // Continue backtracking
-                        }
-                    }
-                }
-            } else {
-                // --- ACCEPT ---
-                if self.debug.enabled && self.debug.show_accept {
-                    self.print_marked(Some((pos_x, pos_y)),
-                                      &format!("ACCEPT '{}' (advance)", pos_char));
-                    self.debug_pause(DebugKind::Accept);
-                }
-
-                // Valid placement, move to the next cell
-                steps.push(current_step);
-                current_index += 1;
-
-                if current_index == empty_locations.len() {
-                    // Puzzle solved
-                    self.print();
-                    println!("Cycle: {}", i);
-                    println!("Sudoku solved!");
-                    return;
-                }
-
-                // Prepare the next step
-                let (next_x, next_y) = empty_locations[current_index];
-                current_step = Step::new(next_x, next_y, '1');
-            }
-        }
-
-        // If the loop completes without returning, the puzzle was not solved
-        self.print();
-        println!("Reached cycle limit without solving the puzzle.");
-    }
-
-    fn check_pos_for_valid(&self, x: usize, y: usize) -> bool{
-        let char = self.grid[x][y];
-
-        if char == '.' {
-            return true;
-        }
-
-        for new_x in 0..9 {
-            if new_x != x && self.grid[new_x][y] == char {
-                return false;
-            }
-        }
-
-        for new_y in 0..9 {
-            if new_y != y && self.grid[x][new_y] == char {
-                return false;
-            }
-        }
-
-        let grid_x = (x / 3) * 3;
-        let grid_y = (y / 3) * 3;
-
-        for xi in grid_x..grid_x + 3 {
-            for yj in grid_y..grid_y + 3 {
-                if xi == x && yj == y {
-                    continue;
-                }
-                if self.grid[xi][yj] == char {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    fn fill(&mut self, sudoku_board: [[char; 9 ]; 9]) {
-        self.grid = sudoku_board.clone()
-    }
+    });
 }
 
 fn clear_screen() {
@@ -372,122 +366,22 @@ fn clear_screen() {
     print!("\n\n\n");
 }
 
-fn main() {
+#[inline]
+fn get_idx(row: usize, col: usize) -> usize {
+    row * 9 + col
+}
+
+fn main() -> eframe::Result<()> {
     let args: Args = Args::parse();
 
-    let sudoku_preview_time = 0;
-    let time_between_sudokus = 0;
-
-    let debug = DebugMode {
-        enabled: args.debug,
-        show_try: args.verbose,
-        show_accept: args.debug,
-        show_reject: args.debug,
-        show_backtrack: args.verbose,
-
-        try_ms: 100,
-        accept_ms: 50,
-        reject_ms: 400,
-        backtrack_ms: 500,
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([400.0, 880.0])
+            .with_min_inner_size([320.0, 480.0]),
+        ..Default::default()
     };
 
-    let mut sudoku = Sudoku::new(debug);
-
-    let sudoku_grid_easy = [
-        ['5', '3', '.', '.', '7', '.', '.', '.', '.'],
-        ['6', '.', '.', '1', '9', '5', '.', '.', '.'],
-        ['.', '9', '8', '.', '.', '.', '.', '6', '.'],
-        ['8', '.', '.', '.', '6', '.', '.', '.', '3'],
-        ['4', '.', '.', '8', '.', '3', '.', '.', '1'],
-        ['7', '.', '.', '.', '2', '.', '.', '.', '6'],
-        ['.', '6', '.', '.', '.', '.', '2', '8', '.'],
-        ['.', '.', '.', '4', '1', '9', '.', '.', '5'],
-        ['.', '.', '.', '.', '8', '.', '.', '7', '9'],
-    ];
-    let sudoku_grid_medium = [
-        ['8', '.', '.', '.', '.', '.', '.', '.', '.'],
-        ['.', '.', '3', '6', '.', '.', '.', '.', '.'],
-        ['.', '7', '.', '.', '9', '.', '2', '.', '.'],
-        ['.', '5', '.', '.', '.', '7', '.', '.', '.'],
-        ['.', '.', '.', '.', '4', '5', '7', '.', '.'],
-        ['.', '.', '.', '1', '.', '.', '.', '3', '.'],
-        ['.', '.', '1', '.', '.', '.', '.', '6', '8'],
-        ['.', '.', '8', '5', '.', '.', '.', '1', '.'],
-        ['.', '9', '.', '.', '.', '.', '4', '.', '.'],
-    ];
-    let sudoku_grid_hard = [
-        ['.', '.', '5', '3', '.', '.', '.', '.', '.'],
-        ['8', '.', '.', '.', '.', '.', '.', '2', '.'],
-        ['.', '7', '.', '.', '1', '.', '5', '.', '.'],
-        ['4', '.', '.', '.', '.', '5', '3', '.', '.'],
-        ['.', '1', '.', '.', '7', '.', '.', '.', '6'],
-        ['.', '.', '3', '2', '.', '.', '.', '8', '.'],
-        ['.', '6', '.', '5', '.', '.', '.', '.', '9'],
-        ['.', '.', '4', '.', '.', '.', '.', '3', '.'],
-        ['.', '.', '.', '.', '.', '9', '7', '.', '.'],
-    ];
-    let sudoku_grid_very_hard = [
-        ['.', '.', '4', '.', '.', '.', '6', '3', '.'],
-        ['.', '.', '.', '.', '.', '.', '.', '.', '.'],
-        ['.', '.', '.', '.', '.', '.', '8', '.', '2'],
-        ['.', '.', '.', '5', '.', '.', '.', '.', '9'],
-        ['.', '.', '.', '.', '7', '.', '.', '.', '.'],
-        ['9', '.', '.', '.', '.', '8', '.', '.', '.'],
-        ['2', '.', '3', '.', '.', '.', '.', '.', '.'],
-        ['.', '.', '.', '.', '.', '.', '.', '.', '.'],
-        ['.', '6', '.', '.', '.', '.', '.', '9', '.'],
-    ];
-
-
-    println!("Easy sudoku!");
-    sudoku.fill(sudoku_grid_easy);
-    sudoku.print();
-    sleep(Duration::from_secs(sudoku_preview_time));
-    println!("");
-    println!("Start!");
-    let start_time = Instant::now();
-    sudoku.solve(1_000_000_000);
-    let end_time = Instant::now();
-    println!("Done! Took {:?}", end_time.duration_since(start_time));
-    println!("");
-    sleep(Duration::from_secs(time_between_sudokus));
-
-    println!("Medium sudoku!");
-    sudoku.fill(sudoku_grid_medium);
-    sudoku.print();
-    sleep(Duration::from_secs(sudoku_preview_time));
-    println!("");
-    println!("Start!");
-    let start_time = Instant::now();
-    sudoku.solve(1_000_000_000);
-    let end_time = Instant::now();
-    println!("Done! Took {:?}", end_time.duration_since(start_time));
-    println!("");
-    sleep(Duration::from_secs(time_between_sudokus));
-
-    println!("Hard sudoku!");
-    sudoku.fill(sudoku_grid_hard);
-    sudoku.print();
-    sleep(Duration::from_secs(sudoku_preview_time));
-    println!("");
-    println!("Start!");
-    let start_time = Instant::now();
-    sudoku.solve(1_000_000_000);
-    let end_time = Instant::now();
-    println!("Done! Took {:?}", end_time.duration_since(start_time));
-    println!("");
-    sleep(Duration::from_secs(time_between_sudokus));
-
-    println!("Very hard sudoku!");
-    sudoku.fill(sudoku_grid_very_hard);
-    sudoku.print();
-    sleep(Duration::from_secs(sudoku_preview_time));
-    println!("");
-    println!("Start!");
-    let start_time = Instant::now();
-    sudoku.solve(1_000_000_000);
-    let end_time = Instant::now();
-    println!("Done! Took {:?}", end_time.duration_since(start_time));
-    println!("");
-    sleep(Duration::from_secs(time_between_sudokus));
+    eframe::run_native("Sudoku Solver", native_options, Box::new( |cc|
+        Ok(Box::new(SudokuApp::new(cc, args)))
+    ))
 }
